@@ -1,0 +1,6 @@
+output/
+kiss/
+__pycache__/
+*.pyc
+*.pyo
+.claude/
