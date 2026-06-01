@@ -192,8 +192,8 @@ def upscale_ai(input_path, output_path, scale, ffmpeg, ffprobe, model_name):
 
     # ── Model selection ─────────────────────────────────────────────────────
     model_map = {
-        "RealESRGAN_x4plus": (RRDBNet(3, 3, 64, 23, gc=32), 4),
-        "RealESRGAN_x2plus": (RRDBNet(3, 3, 64, 23, gc=32), 2),
+        "RealESRGAN_x4plus": (RRDBNet(num_in_ch=3, num_out_ch=3, num_feat=64, num_block=23, num_grow_ch=32, scale=4), 4),
+        "RealESRGAN_x2plus": (RRDBNet(num_in_ch=3, num_out_ch=3, num_feat=64, num_block=23, num_grow_ch=32, scale=2), 2),
     }
     if model_name not in model_map:
         print(f"[WARN] Unknown model '{model_name}', defaulting to RealESRGAN_x4plus")
@@ -234,7 +234,8 @@ def upscale_ai(input_path, output_path, scale, ffmpeg, ffprobe, model_name):
             output, _ = upsampler.enhance(img, outscale=scale)
             cv2.imwrite(str(frames_out / frame_path.name), output)
             pct = i / total * 100
-            bar = "█" * int(pct // 2) + "░" * (50 - int(pct // 2))
+            filled = int(pct // 2)
+            bar = "#" * filled + "-" * (50 - filled)
             print(f"\r  [{bar}] {i}/{total} ({pct:.0f}%)", end="", flush=True)
         print()
 

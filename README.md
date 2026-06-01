@@ -1,5 +1,7 @@
 # 影片超解析度放大工具
 
+[English](README.en.md) | 繁體中文
+
 將低解析度影片（如 640×480）升級為高清畫質（720p / 1080p / 4K），提供三種使用方式：
 
 | 使用方式 | 說明 | 適合對象 |
@@ -255,6 +257,52 @@ pip install torch torchvision --index-url https://download.pytorch.org/whl/cu121
 
 ---
 
+## 測試
+
+執行所有單元測試與整合測試：
+
+```powershell
+python -m unittest test_upscale -v
+```
+
+測試涵蓋範圍（44 個測試案例）：
+
+| 模組 | 測試類別 | 說明 |
+|------|----------|------|
+| `upscale.py` | `TestParseTime` | 時間字串解析（時/分/秒/小數） |
+| `upscale.py` | `TestResolveTarget` | 解析度轉換與比例計算 |
+| `upscale.py` | `TestCleanup` | 不完整輸出檔清理 |
+| `upscale.py` | `TestFindFfmpeg` | FFmpeg 路徑偵測 |
+| `upscale.py` | `TestGetVideoInfo` | 影片資訊讀取（需 ffprobe + test_clip.mp4） |
+| `upscale.py` | `TestUpscaleSimple` | Lanczos 轉檔整合測試（需 ffmpeg） |
+| `batch_upscale.py` | `TestFmtTime` | 時間格式化 |
+| `batch_upscale.py` | `TestProcessFile` | 子程序呼叫邏輯（mock） |
+
+整合測試需要 `test_clip.mp4`（5 秒測試短片），可從任意影片擷取。
+
+---
+
+## 已知相容性修補
+
+安裝 AI 套件後若遇到以下錯誤，程式已自動修補（首次安裝時需手動執行一次）：
+
+**`ModuleNotFoundError: torchvision.transforms.functional_tensor`**
+
+```powershell
+# 修補 basicsr（Python 3.11+ 相容性）
+python -c "
+import site, pathlib
+p = pathlib.Path(site.getsitepackages()[0]) / 'basicsr/data/degradations.py'
+p.write_text(p.read_text().replace(
+    'from torchvision.transforms.functional_tensor import rgb_to_grayscale',
+    'from torchvision.transforms.functional import rgb_to_grayscale'
+))
+print('patched:', p)
+"
+```
+
+---
+
 ## 檔案結構
 
 ```
@@ -263,8 +311,10 @@ video/
 ├── launcher.py         # GUI 圖形介面主程式（含即時進度顯示）
 ├── upscale.py          # 單一影片命令列工具
 ├── batch_upscale.py    # 批次轉檔命令列工具
+├── test_upscale.py     # 單元測試與整合測試（44 個測試案例）
 ├── force_delete.bat    # 強制刪除啟動器（拖曳或雙擊使用）
 ├── force_delete.ps1    # 強制刪除邏輯（重試 + 重開機排程）
 ├── install_ai.bat      # AI 套件一鍵安裝（命令列版）
-└── README.md           # 本說明文件
+├── README.md           # 本說明文件（繁體中文）
+└── README.en.md        # 本說明文件（English）
 ```
