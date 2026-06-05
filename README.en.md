@@ -46,7 +46,7 @@ pip install psutil
 
 ### Step 3: Install AI packages (AI mode only)
 
-**Option A (recommended):** Open the GUI and click the "Install AI Packages" button.
+**Option A (recommended):** Open the GUI and click the **"Install AI Packages"** button. The installer automatically detects your NVIDIA GPU and installs the correct CUDA build.
 
 **Option B:** Run the batch file in the project folder:
 
@@ -54,7 +54,7 @@ pip install psutil
 install_ai.bat
 ```
 
-Packages installed: `torch`, `realesrgan`, `basicsr`, `opencv-python`
+Packages installed: `torch` (CUDA 12.8 build, supports RTX 5000/4000 series), `realesrgan`, `basicsr`, `opencv-python`
 
 ---
 
@@ -73,7 +73,9 @@ Double-click `start.bat` to open the graphical interface.
 | Target resolution | 480p / 720p / 1080p / 1440p / 4K |
 | Method | Fast Lanczos or AI Super-Resolution |
 | Include subfolders | Recursive search in batch mode |
-| Install AI packages | One-click install of Real-ESRGAN dependencies |
+| Install AI packages | One-click install with auto GPU/CPU detection |
+| GPU status bar | Detects GPU and PyTorch version at startup; shows a fix button if misconfigured |
+| Language switcher | Button in the top-right header; switches between English and 中文 instantly |
 | Progress panel | Live percentage, FPS, speed, and ETA |
 | Execution log | Detailed step-by-step output |
 
@@ -84,12 +86,8 @@ Progress
 Overall: ████████████░░░░░░░  60%   3 / 5 files
          PITAZO_ENERO_12_2015.mp4
 Current: ████████████████░░░  78%
-         43 fps   Speed ×1.4   Remaining 00:45
+         43 fps   AI processing   ETA 00:45
 ```
-
-- **Overall**: Completed file count and percentage across the batch
-- **Current**: Progress for the file currently being processed
-- **Stats**: FPS, processing speed multiplier, remaining time
 
 ---
 
@@ -177,26 +175,48 @@ A `batch_log.txt` is written to the output folder after each run recording succe
 
 ## GPU Acceleration (NVIDIA)
 
-Check your CUDA version:
+### Automatic install (recommended)
+
+Open the GUI and click **"Install AI Packages"**. The installer detects your NVIDIA GPU and installs **CUDA 12.8** PyTorch, which supports the RTX 5000 (Blackwell) and RTX 4000 (Ada) series.
+
+### Manual install
 
 ```powershell
-nvidia-smi
+# CUDA 12.8 — supports RTX 5000 Blackwell and RTX 4000 Ada series
+pip install torch torchvision --index-url https://download.pytorch.org/whl/cu128
 ```
 
-Then visit [https://pytorch.org/get-started/locally/](https://pytorch.org/get-started/locally/) to pick the matching build. For example, CUDA 12.1:
+Verify the installation:
 
 ```powershell
-pip install torch torchvision --index-url https://download.pytorch.org/whl/cu121
+python -c "import torch; print('CUDA:', torch.cuda.is_available()); print('GPU:', torch.cuda.get_device_name(0))"
 ```
 
-After installing, set `half=False` → `half=True` in `upscale.py` for additional speed.
+### GPU status bar
+
+The GUI automatically detects and displays GPU status at startup:
+
+| Display | Meaning |
+|---------|---------|
+| 🟢 `GPU Ready: RTX 5060   PyTorch 2.x.x+cu128` | All good — AI mode uses GPU |
+| 🔴 `Warning: NVIDIA GPU detected but PyTorch is CPU build...` | CPU build installed — a **One-Click Fix** button appears |
+| ⚫ `No NVIDIA GPU detected` | No NVIDIA card — AI mode uses CPU |
+
+### AI mode GPU performance optimizations
+
+| Optimization | Description |
+|---|---|
+| NVENC hardware encoding | Auto-detected; uses GPU encoder instead of CPU libx264 when NVIDIA GPU is available |
+| Threaded I/O pipeline | Frame read / GPU inference / frame write run in parallel threads — GPU stays busy |
+| Auto tile size by VRAM | Tile size selected automatically (≥10 GB VRAM = no tiling, fastest) |
+| FP16 inference | Half-precision enabled automatically in GPU mode — ~2× speed boost |
 
 ---
 
 ## Output Specs
 
-- Video codec: H.264 (libx264), CRF 18 (near-lossless quality)
-- Encoding preset: medium (best balance of speed and quality)
+- Video codec: `h264_nvenc` (GPU hardware, when NVIDIA available) or `libx264` CRF 18 (CPU)
+- Encoding preset: nvenc `p4` / libx264 `medium`
 - MP4 structure: moov atom at front (`-movflags +faststart`) for broad player compatibility
 - Audio: copied from source without re-encoding
 - Container: matches input (.mp4 → .mp4)
@@ -240,11 +260,18 @@ The script runs in sequence:
 **`ModuleNotFoundError: realesrgan`**
 → AI packages not installed. Click "Install AI Packages" in the GUI or run `install_ai.bat`.
 
-**AI mode is very slow**
+**AI mode hammers CPU at 99% but GPU stays at 0–5%**
+→ A CPU build of PyTorch is installed — AI inference runs entirely on CPU. If the GPU status bar shows a red warning, click **One-Click Fix** to reinstall the CUDA build. Or run manually:
+```powershell
+pip install torch torchvision --index-url https://download.pytorch.org/whl/cu128 --force-reinstall
+```
+Restart the app after installation; GPU utilization should rise significantly.
+
+**AI mode is very slow (no GPU)**
 → Without a GPU, each frame takes 5–30 seconds. Long videos require patience; use fast mode first to verify the workflow.
 
 **Out of memory (OOM)**
-→ `upscale.py` uses `tile=512` to split large frames. Reduce to `256` in the source if OOM persists.
+→ Tile size is selected automatically based on VRAM. If OOM persists, manually set a smaller tile value (e.g. `256`) in `upscale_ai()`.
 
 **GUI won't open**
 → Confirm Python is installed and in PATH; or run `python launcher.py` directly from the terminal.
@@ -265,7 +292,7 @@ Run all unit and integration tests:
 python -m unittest test_upscale -v
 ```
 
-Test coverage (44 test cases):
+Test coverage (82 test cases — 73 pass + 9 skip requiring `test_clip.mp4`):
 
 | Module | Test class | Description |
 |--------|------------|-------------|
@@ -273,10 +300,16 @@ Test coverage (44 test cases):
 | `upscale.py` | `TestResolveTarget` | Resolution conversion and scale factor |
 | `upscale.py` | `TestCleanup` | Incomplete output file removal |
 | `upscale.py` | `TestFindFfmpeg` | FFmpeg path detection |
+| `upscale.py` | `TestCheckNvenc` | NVENC encoder detection (mocked) |
+| `upscale.py` | `TestEncoderArgs` | GPU / CPU encoder argument generation |
+| `upscale.py` | `TestAutoTileSize` | VRAM-based auto tile size selection |
+| `upscale.py` | `TestUpscaleFramesThreaded` | Threaded I/O pipeline (requires opencv) |
 | `upscale.py` | `TestGetVideoInfo` | Video info extraction (requires ffprobe + test_clip.mp4) |
 | `upscale.py` | `TestUpscaleSimple` | Lanczos upscale integration test (requires ffmpeg) |
 | `batch_upscale.py` | `TestFmtTime` | Time formatting |
 | `batch_upscale.py` | `TestProcessFile` | Subprocess invocation logic (mocked) |
+| `launcher.py` | `TestFmtEta` | GUI countdown time formatting |
+| `launcher.py` | `TestLangStructure` | Translation dict completeness and placeholder consistency |
 
 Integration tests require `test_clip.mp4` (a short 5-second clip extracted from any video).
 
@@ -307,10 +340,10 @@ print('patched:', p)
 ```
 video/
 ├── start.bat           # Double-click to open GUI (entry point for general users)
-├── launcher.py         # GUI main application (with live progress display)
+├── launcher.py         # GUI main application (live progress, language switcher, GPU status)
 ├── upscale.py          # Single-file CLI tool
 ├── batch_upscale.py    # Batch processing CLI tool
-├── test_upscale.py     # Unit and integration tests (44 test cases)
+├── test_upscale.py     # Unit and integration tests (82 test cases)
 ├── force_delete.bat    # Force-delete launcher (drag-and-drop or double-click)
 ├── force_delete.ps1    # Force-delete logic (retry + reboot scheduling)
 ├── install_ai.bat      # One-click AI package installer (CLI version)

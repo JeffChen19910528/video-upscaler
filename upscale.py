@@ -10,10 +10,12 @@ import os
 import re
 import sys
 import time
+import threading
 import subprocess
 import shutil
 import tempfile
 from pathlib import Path
+from queue import Queue
 
 _TIME_RE  = re.compile(r"time=(\d+):(\d+):([\d.]+)")
 _FPS_RE   = re.compile(r"fps=\s*([\d.]+)")
@@ -118,6 +120,101 @@ def _cleanup(path: str):
         pass
 
 
+def _check_nvenc(ffmpeg: str) -> bool:
+    """Return True if h264_nvenc hardware encoder is available."""
+    try:
+        r = subprocess.run(
+            [ffmpeg, "-hide_banner", "-encoders"],
+            capture_output=True, text=True, timeout=10,
+        )
+        return "h264_nvenc" in r.stdout
+    except Exception:
+        return False
+
+
+def _encoder_args(use_nvenc: bool) -> list[str]:
+    if use_nvenc:
+        # NVENC: hardware H.264 encoding on NVIDIA GPU
+        return ["-c:v", "h264_nvenc", "-rc", "vbr", "-cq", "18",
+                "-preset", "p4", "-b:v", "0"]
+    return ["-c:v", "libx264", "-crf", "18", "-preset", "medium"]
+
+
+def _auto_tile_size(use_gpu: bool) -> int:
+    """Pick Real-ESRGAN tile size based on available GPU VRAM."""
+    if not use_gpu:
+        return 256
+    try:
+        import torch
+        vram = torch.cuda.get_device_properties(0).total_memory
+        if vram >= 10 * 1024 ** 3:
+            return 0    # no tiling — fastest (≥10 GB VRAM)
+        if vram >= 8 * 1024 ** 3:
+            return 768
+        if vram >= 6 * 1024 ** 3:
+            return 512
+        return 256
+    except Exception:
+        return 512
+
+
+def _upscale_frames_threaded(upsampler, frame_files, frames_out, scale,
+                              total_frames, processed_offset, t0_ai) -> int:
+    """
+    Threaded read → GPU → write pipeline so the GPU never idles on disk I/O.
+
+    Reader thread pre-loads PNG frames into a queue while the main thread
+    feeds them to the GPU. Writer thread flushes results asynchronously.
+    Returns the updated processed-frame count.
+    """
+    READ_BUF  = 8
+    WRITE_BUF = 8
+
+    read_q  = Queue(maxsize=READ_BUF)
+    write_q = Queue(maxsize=WRITE_BUF)
+
+    def _reader():
+        import cv2
+        for fp in frame_files:
+            img = cv2.imread(str(fp), cv2.IMREAD_UNCHANGED)
+            read_q.put((fp.name, img))
+        read_q.put(None)  # sentinel
+
+    def _writer():
+        import cv2
+        while True:
+            item = write_q.get()
+            if item is None:
+                break
+            name, img = item
+            cv2.imwrite(str(frames_out / name), img)
+
+    rt = threading.Thread(target=_reader, daemon=True)
+    wt = threading.Thread(target=_writer, daemon=True)
+    rt.start()
+    wt.start()
+
+    processed = processed_offset
+    while True:
+        item = read_q.get()
+        if item is None:
+            break
+        name, img = item
+        out_img, _ = upsampler.enhance(img, outscale=scale)
+        write_q.put((name, out_img))
+        processed += 1
+        pct     = min(processed / total_frames * 100, 99.9)
+        elapsed = time.time() - t0_ai
+        fps_ai  = processed / elapsed if elapsed > 0 else 0
+        eta     = (total_frames - processed) / fps_ai if fps_ai > 0 else 0
+        print(f"PROGRESS:{pct:.1f}:{fps_ai:.2f}:AI:{eta:.0f}", flush=True)
+
+    write_q.put(None)
+    rt.join()
+    wt.join()
+    return processed
+
+
 def get_video_info(ffprobe, input_path):
     """Return (width, height, fps, duration) for the input video."""
     import json
@@ -210,16 +307,35 @@ def upscale_ai(input_path, output_path, scale, ffmpeg, ffprobe, model_name):
 
     if use_gpu:
         import torch
-        print(f"  GPU     : {torch.cuda.get_device_name(0)} (CUDA — FP16 啟用)")
+        vram_gb = torch.cuda.get_device_properties(0).total_memory / 1024 ** 3
+        print(f"  GPU     : {torch.cuda.get_device_name(0)} (CUDA — FP16 啟用, {vram_gb:.1f} GB VRAM)")
     else:
-        print("  [警告] 未偵測到 CUDA GPU，使用 CPU 處理。")
-        print("         1 小時影片在 CPU 上可能需要數天，強烈建議安裝 CUDA 版 PyTorch。")
+        import torch as _t
+        ver = _t.__version__
+        is_cpu_build = "+cpu" in ver
+        print(f"  [錯誤] GPU 無法使用！PyTorch 版本：{ver}")
+        if is_cpu_build:
+            print("  ► 原因：安裝的是 CPU 版 PyTorch，沒有 CUDA 支援。")
+            print("  ► 修復：在程式介面按「安裝 AI 套件」重新安裝，")
+            print("         或執行：pip install torch torchvision")
+            print("                  --index-url https://download.pytorch.org/whl/cu128")
+        else:
+            print("  ► 原因：CUDA 驅動程式或版本不符，請確認 NVIDIA 驅動已正確安裝。")
+        print("  ► 目前退回 CPU 處理，速度將非常慢。")
+
+    tile_size = _auto_tile_size(use_gpu)
+    tile_label = "無分塊" if tile_size == 0 else str(tile_size)
+    print(f"  Tile    : {tile_label}  (依 VRAM 自動選擇)")
+
+    use_nvenc = use_gpu and _check_nvenc(ffmpeg)
+    enc_label = "h264_nvenc (GPU)" if use_nvenc else "libx264 (CPU)"
+    print(f"  Encoder : {enc_label}")
 
     upsampler = RealESRGANer(
         scale=model_scale,
         model_path=f"https://github.com/xinntao/Real-ESRGAN/releases/download/v0.1.0/{model_name}.pth",
         model=model,
-        tile=512,
+        tile=tile_size,
         tile_pad=10,
         pre_pad=0,
         half=use_gpu,
@@ -263,26 +379,20 @@ def upscale_ai(input_path, output_path, scale, ffmpeg, ffprobe, model_name):
             if n == 0:
                 break
 
-            # Step 2: AI upscale each frame in this chunk
-            for i, frame_path in enumerate(frame_files, 1):
-                img = cv2.imread(str(frame_path), cv2.IMREAD_UNCHANGED)
-                out_img, _ = upsampler.enhance(img, outscale=scale)
-                cv2.imwrite(str(frames_out / frame_path.name), out_img)
-                processed += 1
-                pct     = min(processed / total_frames * 100, 99.9)
-                elapsed = time.time() - t0_ai
-                fps_ai  = processed / elapsed if elapsed > 0 else 0
-                eta     = (total_frames - processed) / fps_ai if fps_ai > 0 else 0
-                print(f"PROGRESS:{pct:.1f}:{fps_ai:.2f}:AI:{eta:.0f}", flush=True)
+            # Step 2: AI upscale — threaded I/O keeps GPU busy
+            processed = _upscale_frames_threaded(
+                upsampler, frame_files, frames_out, scale,
+                total_frames, processed, t0_ai,
+            )
             print()
 
-            # Step 3: encode chunk frames to a segment (no audio)
+            # Step 3: encode chunk frames to a segment (NVENC when available)
             seg_path = segs_dir / f"seg_{chunk_idx:04d}.mp4"
             subprocess.run([
                 ffmpeg,
                 "-framerate", str(fps),
                 "-i", str(frames_out / "%08d.png"),
-                "-c:v", "libx264", "-crf", "18", "-preset", "medium",
+                *_encoder_args(use_nvenc),
                 "-y", str(seg_path),
             ], check=True, capture_output=True)
             seg_paths.append(seg_path)
