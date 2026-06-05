@@ -166,10 +166,12 @@ def upscale_simple(input_path, output_path, target_w, target_h, ffmpeg, ffprobe)
 
 def upscale_ai(input_path, output_path, scale, ffmpeg, ffprobe, model_name):
     """
-    Real-ESRGAN AI upscaling pipeline:
-      1. Extract frames (FFmpeg)
-      2. Super-resolve each frame (Real-ESRGAN)
-      3. Re-encode video with original audio (FFmpeg)
+    Real-ESRGAN AI upscaling pipeline (chunked to support long videos):
+      For each 60-second chunk:
+        1. Extract frames (FFmpeg)
+        2. Super-resolve each frame (Real-ESRGAN)
+        3. Encode chunk to a temp segment (FFmpeg)
+      Finally: concatenate all segments + original audio.
     """
     try:
         import cv2
@@ -200,60 +202,115 @@ def upscale_ai(input_path, output_path, scale, ffmpeg, ffprobe, model_name):
         model_name = "RealESRGAN_x4plus"
     model, model_scale = model_map[model_name]
 
+    try:
+        import torch
+        use_gpu = torch.cuda.is_available()
+    except ImportError:
+        use_gpu = False
+
+    if use_gpu:
+        import torch
+        print(f"  GPU     : {torch.cuda.get_device_name(0)} (CUDA — FP16 啟用)")
+    else:
+        print("  [警告] 未偵測到 CUDA GPU，使用 CPU 處理。")
+        print("         1 小時影片在 CPU 上可能需要數天，強烈建議安裝 CUDA 版 PyTorch。")
+
     upsampler = RealESRGANer(
         scale=model_scale,
         model_path=f"https://github.com/xinntao/Real-ESRGAN/releases/download/v0.1.0/{model_name}.pth",
         model=model,
-        tile=512,          # split large frames into tiles to fit GPU VRAM
+        tile=512,
         tile_pad=10,
         pre_pad=0,
-        half=False,        # set True if you have a CUDA GPU for speed
+        half=use_gpu,
     )
+
+    CHUNK_SECS = 60  # seconds per processing chunk — limits peak disk usage
 
     with tempfile.TemporaryDirectory(prefix="upscale_") as tmp:
         frames_in  = Path(tmp) / "in"
         frames_out = Path(tmp) / "out"
-        frames_in.mkdir(); frames_out.mkdir()
+        segs_dir   = Path(tmp) / "segs"
+        frames_in.mkdir(); frames_out.mkdir(); segs_dir.mkdir()
 
-        # Step 1: extract frames
-        print("\n[1/3] Extracting frames ...")
-        subprocess.run([
-            ffmpeg, "-i", input_path,
-            str(frames_in / "%08d.png"),
-            "-y"
-        ], check=True, capture_output=True)
+        total_frames   = max(1, int(fps * dur))
+        processed      = 0
+        seg_paths: list[Path] = []
+        chunk_idx      = 0
+        start_t        = 0.0
+        t0_ai          = time.time()
 
-        frame_files = sorted(frames_in.glob("*.png"))
-        total = len(frame_files)
-        print(f"      {total} frames extracted")
+        while start_t < dur:
+            chunk_dur = min(CHUNK_SECS, dur - start_t)
 
-        # Step 2: AI upscale each frame
-        print(f"\n[2/3] AI upscaling {total} frames (this takes a while) ...")
-        for i, frame_path in enumerate(frame_files, 1):
-            img = cv2.imread(str(frame_path), cv2.IMREAD_UNCHANGED)
-            output, _ = upsampler.enhance(img, outscale=scale)
-            cv2.imwrite(str(frames_out / frame_path.name), output)
-            pct = i / total * 100
-            filled = int(pct // 2)
-            bar = "#" * filled + "-" * (50 - filled)
-            print(f"\r  [{bar}] {i}/{total} ({pct:.0f}%)", end="", flush=True)
-        print()
+            # ── clear frame dirs from previous chunk ────────────────────────
+            for f in frames_in.glob("*.png"):
+                f.unlink()
+            for f in frames_out.glob("*.png"):
+                f.unlink()
 
-        # Step 3: re-encode with original audio
-        print("\n[3/3] Re-encoding video ...")
-        encode_cmd = [
+            print(f"\n[Chunk {chunk_idx + 1}]  {start_t:.1f}s – {start_t + chunk_dur:.1f}s")
+
+            # Step 1: extract this chunk's frames
+            subprocess.run([
+                ffmpeg, "-ss", str(start_t), "-i", input_path,
+                "-t", str(chunk_dur), "-vsync", "0",
+                str(frames_in / "%08d.png"), "-y",
+            ], check=True, capture_output=True)
+
+            frame_files = sorted(frames_in.glob("*.png"))
+            n = len(frame_files)
+            if n == 0:
+                break
+
+            # Step 2: AI upscale each frame in this chunk
+            for i, frame_path in enumerate(frame_files, 1):
+                img = cv2.imread(str(frame_path), cv2.IMREAD_UNCHANGED)
+                out_img, _ = upsampler.enhance(img, outscale=scale)
+                cv2.imwrite(str(frames_out / frame_path.name), out_img)
+                processed += 1
+                pct     = min(processed / total_frames * 100, 99.9)
+                elapsed = time.time() - t0_ai
+                fps_ai  = processed / elapsed if elapsed > 0 else 0
+                eta     = (total_frames - processed) / fps_ai if fps_ai > 0 else 0
+                print(f"PROGRESS:{pct:.1f}:{fps_ai:.2f}:AI:{eta:.0f}", flush=True)
+            print()
+
+            # Step 3: encode chunk frames to a segment (no audio)
+            seg_path = segs_dir / f"seg_{chunk_idx:04d}.mp4"
+            subprocess.run([
+                ffmpeg,
+                "-framerate", str(fps),
+                "-i", str(frames_out / "%08d.png"),
+                "-c:v", "libx264", "-crf", "18", "-preset", "medium",
+                "-y", str(seg_path),
+            ], check=True, capture_output=True)
+            seg_paths.append(seg_path)
+
+            start_t   += chunk_dur
+            chunk_idx += 1
+
+        # ── Concatenate all segments and mux original audio ──────────────────
+        print("\n[Final] Concatenating segments and adding audio ...")
+        concat_list = segs_dir / "concat.txt"
+        concat_list.write_text(
+            "\n".join(f"file '{p.name}'" for p in seg_paths),
+            encoding="utf-8",
+        )
+
+        concat_cmd = [
             ffmpeg,
-            "-framerate", str(fps),
-            "-i", str(frames_out / "%08d.png"),
+            "-f", "concat", "-safe", "0",
+            "-i", str(concat_list),
             "-i", input_path,
             "-map", "0:v", "-map", "1:a?",
-            "-c:v", "libx264", "-crf", "18", "-preset", "medium",
+            "-c:v", "copy",
             "-c:a", "copy",
             "-movflags", "+faststart",
-            "-y", output_path
+            "-y", output_path,
         ]
         try:
-            _run_ffmpeg(encode_cmd, dur, output_path)
+            _run_ffmpeg(concat_cmd, dur, output_path)
         except KeyboardInterrupt:
             _cleanup(output_path)
             raise

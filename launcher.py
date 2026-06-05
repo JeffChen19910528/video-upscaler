@@ -387,8 +387,9 @@ class App:
             return
         if not messagebox.askyesno(
             "安裝 AI 套件",
-            "將安裝以下套件（CPU 版，約需 3–10 分鐘）：\n\n"
-            "  • torch + torchvision\n  • realesrgan\n  • basicsr\n  • opencv-python\n\n"
+            "將安裝以下套件（約需 3–10 分鐘）：\n\n"
+            "  • torch + torchvision（自動偵測 GPU，有 NVIDIA 裝 CUDA 版）\n"
+            "  • realesrgan\n  • basicsr\n  • opencv-python\n\n"
             "是否繼續？"
         ):
             return
@@ -396,9 +397,19 @@ class App:
         self._set_busy("安裝 AI 套件中...")
 
         def _do():
+            import shutil
+            has_nvidia = shutil.which("nvidia-smi") is not None
+            if has_nvidia:
+                torch_cmd = [PYTHON, "-m", "pip", "install", "torch", "torchvision",
+                             "--index-url", "https://download.pytorch.org/whl/cu121"]
+                self.log_q.put(("ok", "偵測到 NVIDIA GPU，安裝 CUDA 版 PyTorch（cu121）..."))
+            else:
+                torch_cmd = [PYTHON, "-m", "pip", "install", "torch", "torchvision",
+                             "--index-url", "https://download.pytorch.org/whl/cpu"]
+                self.log_q.put(("warn", "未偵測到 NVIDIA GPU，安裝 CPU 版 PyTorch（速度較慢）"))
+
             steps = [
-                [PYTHON, "-m", "pip", "install", "torch", "torchvision",
-                 "--index-url", "https://download.pytorch.org/whl/cpu"],
+                torch_cmd,
                 [PYTHON, "-m", "pip", "install", "realesrgan", "basicsr"],
                 [PYTHON, "-m", "pip", "install", "opencv-python"],
             ]
@@ -489,9 +500,11 @@ class App:
                     pct, fps, speed, eta = payload
                     self.file_pbar["value"] = pct
                     self.file_pct_lbl.config(text=f"{pct:.0f}%")
-                    self.stats_lbl.config(
-                        text=f"  {fps} fps   速度 ×{speed}   剩餘 {_fmt_eta(eta)}"
-                    )
+                    if speed == "AI":
+                        stats = f"  {fps} 幀/秒   AI 處理中   剩餘 {_fmt_eta(eta)}"
+                    else:
+                        stats = f"  {fps} fps   速度 ×{speed}   剩餘 {_fmt_eta(eta)}"
+                    self.stats_lbl.config(text=stats)
 
                 else:
                     self._append(payload, tag)
