@@ -147,9 +147,9 @@ def _auto_tile_size(use_gpu: bool) -> int:
     try:
         import torch
         vram = torch.cuda.get_device_properties(0).total_memory
-        if vram >= 10 * 1024 ** 3:
-            return 0    # no tiling — fastest (≥10 GB VRAM)
         if vram >= 8 * 1024 ** 3:
+            return 0    # no tiling — fastest (≥8 GB VRAM)
+        if vram >= 6 * 1024 ** 3:
             return 768
         if vram >= 6 * 1024 ** 3:
             return 512
@@ -222,7 +222,9 @@ def get_video_info(ffprobe, input_path):
         ffprobe, "-v", "quiet", "-print_format", "json",
         "-show_streams", "-show_format", input_path
     ]
-    result = subprocess.run(cmd, capture_output=True, text=True)
+    result = subprocess.run(cmd, capture_output=True, encoding='utf-8', errors='replace')
+    if not result.stdout or not result.stdout.strip():
+        raise RuntimeError(f"ffprobe failed on '{input_path}': {result.stderr.strip()}")
     data = json.loads(result.stdout)
 
     width = height = fps = duration = None
