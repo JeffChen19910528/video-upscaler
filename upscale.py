@@ -147,11 +147,12 @@ def _auto_tile_size(use_gpu: bool) -> int:
     try:
         import torch
         vram = torch.cuda.get_device_properties(0).total_memory
-        if vram >= 8 * 1024 ** 3:
+        # Use 7.5 GiB threshold: NVIDIA "8GB" cards report ~7.8 GiB actual
+        if vram >= 7.5 * 1024 ** 3:
             return 0    # no tiling — fastest (≥8 GB VRAM)
-        if vram >= 6 * 1024 ** 3:
+        if vram >= 5.5 * 1024 ** 3:
             return 768
-        if vram >= 6 * 1024 ** 3:
+        if vram >= 3.5 * 1024 ** 3:
             return 512
         return 256
     except Exception:
