@@ -293,6 +293,16 @@ def upscale_ai(input_path, output_path, scale, ffmpeg, ffprobe, model_name):
     print(f"  Model   : {model_name}")
 
     # ── Model selection ─────────────────────────────────────────────────────
+    # Auto-select x2plus for x2 upscaling: x4plus internally produces a 4x
+    # intermediate (5120×2880 for 720p input) then downscales — pure waste.
+    if scale == 2 and model_name == "RealESRGAN_x4plus":
+        model_name = "RealESRGAN_x2plus"
+        print("  [Auto]  Switched to RealESRGAN_x2plus for x2 upscaling (3–5× faster)")
+
+    model_urls = {
+        "RealESRGAN_x4plus": "https://github.com/xinntao/Real-ESRGAN/releases/download/v0.1.0/RealESRGAN_x4plus.pth",
+        "RealESRGAN_x2plus": "https://github.com/xinntao/Real-ESRGAN/releases/download/v0.2.1/RealESRGAN_x2plus.pth",
+    }
     model_map = {
         "RealESRGAN_x4plus": (RRDBNet(num_in_ch=3, num_out_ch=3, num_feat=64, num_block=23, num_grow_ch=32, scale=4), 4),
         "RealESRGAN_x2plus": (RRDBNet(num_in_ch=3, num_out_ch=3, num_feat=64, num_block=23, num_grow_ch=32, scale=2), 2),
@@ -310,6 +320,7 @@ def upscale_ai(input_path, output_path, scale, ffmpeg, ffprobe, model_name):
 
     if use_gpu:
         import torch
+        torch.backends.cudnn.benchmark = True
         vram_gb = torch.cuda.get_device_properties(0).total_memory / 1024 ** 3
         print(f"  GPU     : {torch.cuda.get_device_name(0)} (CUDA — FP16 啟用, {vram_gb:.1f} GB VRAM)")
     else:
@@ -336,7 +347,7 @@ def upscale_ai(input_path, output_path, scale, ffmpeg, ffprobe, model_name):
 
     upsampler = RealESRGANer(
         scale=model_scale,
-        model_path=f"https://github.com/xinntao/Real-ESRGAN/releases/download/v0.1.0/{model_name}.pth",
+        model_path=model_urls[model_name],
         model=model,
         tile=tile_size,
         tile_pad=10,
