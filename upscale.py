@@ -10,6 +10,12 @@ import os
 import re
 import sys
 import time
+
+# Force stdout/stderr to UTF-8 so filenames with any Unicode characters print correctly
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+if hasattr(sys.stderr, "reconfigure"):
+    sys.stderr.reconfigure(encoding="utf-8", errors="replace")
 import threading
 import subprocess
 import shutil
